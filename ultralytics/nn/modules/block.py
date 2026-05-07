@@ -20,6 +20,7 @@ __all__ = (
     "C3TR",
     "CIB",
     "DFL",
+    "TST",
     "ELAN1",
     "PSA",
     "SPP",
@@ -54,6 +55,61 @@ __all__ = (
     "TorchVision",
 )
 
+class TST(nn.Module):
+    """
+    Token-Sharing Transformer (TST) Block.
+    Fuses local features (Query) with global tokens (Key/Value).
+    """
+    def __init__(self, c1, c2, heads=4):
+        """
+        c1: list of [ch_local, ch_global]
+        c2: output channels
+        """
+        super().__init__()
+        cl, cg = c1
+        self.heads = heads
+        self.dk = 4   # Query/Key dim per head
+        self.dv = 16  # Value dim per head
+        
+        # Projections
+        self.q_proj = nn.Conv2d(cl, heads * self.dk, 1)
+        self.k_proj = nn.Conv2d(cg, heads * self.dk, 1)
+        self.v_proj = nn.Conv2d(cg, heads * self.dv, 1)
+        
+        # Feed-Forward Network (FFN)
+        # We explicitly use c2 here for the final output channel
+        self.ffn = nn.Sequential(
+            nn.ReLU(inplace=True),
+            Conv(heads * self.dv, c2, 1), 
+        )
+        
+        # Residual connection is only mathematically possible if input channels match output channels
+        self.add = cl == c2 
+
+    def forward(self, x):
+        f_local, f_global = x  # x is a list from the YAML parser
+        b, _, hl, wl = f_local.shape
+        _, _, hg, wg = f_global.shape
+        
+        # Downsample local to global resolution
+        q_feat = F.adaptive_avg_pool2d(f_local, (hg, wg))
+        
+        # Projections
+        q = self.q_proj(q_feat).view(b, self.heads, self.dk, -1).transpose(-1, -2)
+        k = self.k_proj(f_global).view(b, self.heads, self.dk, -1)
+        v = self.v_proj(f_global).view(b, self.heads, self.dv, -1).transpose(-1, -2)
+        
+        # Cross-Attention
+        attn = (q @ k) * (self.dk ** -0.5)
+        attn = attn.softmax(dim=-1)
+        out = (attn @ v).transpose(-1, -2).contiguous().view(b, -1, hg, wg)
+        
+        # Upsample + FFN
+        out = F.interpolate(out, size=(hl, wl), mode='bilinear', align_corners=False)
+        out = self.ffn(out)
+        
+        # Conditional Residual
+        return (f_local + out) if self.add else out
 
 class DFL(nn.Module):
     """Integral module of Distribution Focal Loss (DFL).

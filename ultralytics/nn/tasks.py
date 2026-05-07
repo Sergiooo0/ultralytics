@@ -72,6 +72,7 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     YOLOESegment26,
     v10Detect,
+    TST
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, SETTINGS, WINDOWS, YAML, colorstr, emojis
 from ultralytics.utils.checks import REMOTE_FILE_PREFIXES, check_file, check_requirements, check_suffix, check_yaml
@@ -1680,6 +1681,13 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is TST:
+            # Output channel size is the size of the local token (first input)
+            c2 = ch[f[0]] 
+            # Get input channel sizes: [ch_local, ch_global]
+            c1 = [ch[x] for x in f] 
+            # Prepend c1 and c2 to the arguments passed to TST.__init__
+            args = [c1, c2, *args]
         elif m in frozenset(
             {
                 Detect,
