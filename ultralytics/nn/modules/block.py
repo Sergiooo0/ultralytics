@@ -71,45 +71,53 @@ class TST(nn.Module):
         self.dk = 4   # Query/Key dim per head
         self.dv = 16  # Value dim per head
         
-        # Projections
-        self.q_proj = nn.Conv2d(cl, heads * self.dk, 1)
-        self.k_proj = nn.Conv2d(cg, heads * self.dk, 1)
-        self.v_proj = nn.Conv2d(cg, heads * self.dv, 1)
-        
-        # Feed-Forward Network (FFN)
-        # We explicitly use c2 here for the final output channel
-        self.ffn = nn.Sequential(
-            nn.ReLU(inplace=True),
-            Conv(heads * self.dv, c2, 1), 
+        # Projections (Conv + BatchNorm)
+        # bias=False is standard practice when immediately followed by BatchNorm
+        self.q_proj = nn.Sequential(
+            nn.Conv2d(cl, heads * self.dk, 1, bias=False),
+            nn.BatchNorm2d(heads * self.dk)
+        )
+        self.k_proj = nn.Sequential(
+            nn.Conv2d(cg, heads * self.dk, 1, bias=False),
+            nn.BatchNorm2d(heads * self.dk)
+        )
+        self.v_proj = nn.Sequential(
+            nn.Conv2d(cg, heads * self.dv, 1, bias=False),
+            nn.BatchNorm2d(heads * self.dv)
         )
         
-        # Residual connection is only mathematically possible if input channels match output channels
-        self.add = cl == c2 
-
+        # Feed-Forward Network (FFN)
+        # ReLU -> Dimension Transformation (Conv2d) -> BatchNorm
+        self.ffn = nn.Sequential(
+            nn.ReLU(inplace=True),
+            nn.Conv2d(heads * self.dv, c2, 1, bias=False), 
+            nn.BatchNorm2d(c2)
+        )
+        
     def forward(self, x):
-        f_local, f_global = x  # x is a list from the YAML parser
+        f_local, f_global = x  
         b, _, hl, wl = f_local.shape
         _, _, hg, wg = f_global.shape
         
         # Downsample local to global resolution
         q_feat = F.adaptive_avg_pool2d(f_local, (hg, wg))
         
-        # Projections
+        # Projections & Reshaping for MHA
         q = self.q_proj(q_feat).view(b, self.heads, self.dk, -1).transpose(-1, -2)
         k = self.k_proj(f_global).view(b, self.heads, self.dk, -1)
         v = self.v_proj(f_global).view(b, self.heads, self.dv, -1).transpose(-1, -2)
         
-        # Cross-Attention
+        # Multi-Head Cross-Attention
         attn = (q @ k) * (self.dk ** -0.5)
         attn = attn.softmax(dim=-1)
         out = (attn @ v).transpose(-1, -2).contiguous().view(b, -1, hg, wg)
         
-        # Upsample + FFN
-        out = F.interpolate(out, size=(hl, wl), mode='bilinear', align_corners=False)
+        # FFN first (on small resolution), then Upsample
         out = self.ffn(out)
+        out = F.interpolate(out, size=(hl, wl), mode='bilinear', align_corners=False)
         
         # Conditional Residual
-        return (f_local + out) if self.add else out
+        return f_local + out
 
 class DFL(nn.Module):
     """Integral module of Distribution Focal Loss (DFL).
